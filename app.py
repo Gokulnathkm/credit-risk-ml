@@ -1,69 +1,92 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+import os
 import joblib
 import pandas as pd
-import numpy as np
+from datetime import datetime
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import Dict, Any
 
-app = FastAPI()
+MODEL_PATH = "models/credit_risk_model.pkl"
 
-# Load trained pipeline
-model = joblib.load("models/credit_risk_model.pkl")
+# ==============================
+# App Initialization
+# ==============================
 
+app = FastAPI(
+    title="Credit Risk Prediction API",
+    version="1.0.0"
+)
 
-# Input Schema (only key business fields required)
+# ==============================
+# Load Model Safely
+# ==============================
+
+if not os.path.exists(MODEL_PATH):
+    raise RuntimeError(
+        "Model file not found. Please run: python src/train.py first."
+    )
+
+saved_obj = joblib.load(MODEL_PATH)
+model = saved_obj["model"]
+trained_at = saved_obj["trained_at"]
+roc_auc = saved_obj["roc_auc"]
+feature_count = saved_obj["feature_count"]
+
+# ==============================
+# Input Schema
+# ==============================
+
 class CreditInput(BaseModel):
-    NAME_CONTRACT_TYPE: str
-    CODE_GENDER: str
-    FLAG_OWN_CAR: str
-    FLAG_OWN_REALTY: str
-    CNT_CHILDREN: int
-    AMT_INCOME_TOTAL: float
-    AMT_CREDIT: float
-    AMT_ANNUITY: float
-    AMT_GOODS_PRICE: float
-    NAME_INCOME_TYPE: str
-    NAME_EDUCATION_TYPE: str
-    NAME_FAMILY_STATUS: str
-    NAME_HOUSING_TYPE: str
-    DAYS_BIRTH: int
-    DAYS_EMPLOYED: int
-    FLAG_MOBIL: int
-    FLAG_WORK_PHONE: int
-    FLAG_PHONE: int
-    FLAG_EMAIL: int
-    OCCUPATION_TYPE: str
+    data: Dict[str, Any]
 
+
+# ==============================
+# Routes
+# ==============================
 
 @app.get("/")
-def home():
-    return {"message": "Credit Risk Prediction API Running"}
+def root():
+    return {
+        "message": "Credit Risk API running",
+        "model_trained_at": trained_at,
+        "roc_auc": roc_auc,
+        "feature_count": feature_count
+    }
 
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "timestamp": datetime.now()}
 
 @app.post("/predict")
-def predict(data: CreditInput):
-    try:
-        input_dict = data.dict()
-        input_df = pd.DataFrame([input_dict])
+def predict(payload: CreditInput):
 
-        # Get expected columns from trained pipeline
+    try:
+        # Get expected training columns from pipeline
         expected_columns = model.named_steps["preprocessor"].feature_names_in_
 
-        # Add missing columns as NaN
+        # Build full row with all expected columns
+        full_input = {}
+
         for col in expected_columns:
-            if col not in input_df.columns:
-                input_df[col] = np.nan
+            full_input[col] = payload.data.get(col, None)
 
-        # Ensure correct order
-        input_df = input_df[expected_columns]
+        input_df = pd.DataFrame([full_input])
 
-        # Predict
         probability = model.predict_proba(input_df)[0][1]
-        prediction = int(probability > 0.5)
+
+        if probability < 0.3:
+            risk = "Low Risk"
+        elif probability < 0.7:
+            risk = "Medium Risk"
+        else:
+            risk = "High Risk"
 
         return {
-            "default_probability": float(probability),
-            "prediction": prediction
+            "default_probability": round(float(probability), 4),
+            "risk_level": risk
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
+    
